@@ -1,0 +1,6 @@
+[submodule "FASM_OOP"]
+	path = FASM_OOP
+	url = https://github.com/ZReticules/FASM_OOP
+[submodule "TgClient"]
+	path = TgClient
+	url = https://github.com/ZReticules/TgClient

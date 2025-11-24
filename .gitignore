@@ -1,0 +1,8 @@
+*.obj
+*.dll
+*.exe
+*.bin
+*.fas
+*.ini
+config.json
+TgClientApiStructures.inc

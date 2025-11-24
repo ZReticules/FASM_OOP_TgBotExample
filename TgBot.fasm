@@ -1,0 +1,545 @@
+define PROGRAM_TYPE Console
+
+include "FASM_OOP\x86.inc"
+include "FASM_OOP\STDHEAD.inc"
+include "encoding\utf8.inc"
+include "FASM_OOP\TOOLS.INC"
+
+include "FASM_OOP\cstdio.inc"
+include "FASM_OOP\String.inc"
+include "FASM_OOP\JSONNode.inc"
+include "FASM_OOP\COM\IRegExp2.inc"
+
+entry main
+
+importlib kernel32, \
+	SetConsoleCP, \
+	SetConsoleOutputCP,\
+	ExitProcess,\
+	MultiByteToWideChar,\
+	WideCharToMultiByte
+
+importlib oleaut32,\
+	SysAllocString,\
+	SysFreeString,\
+	SysStringLen,\
+	VariantClear
+
+include "MyTgClient.inc"
+include "SysStringPair.inc"
+
+proc_noprologue
+
+@bss_alloc TG_API_KEY rptr 1
+
+proc _init_
+	local fconf:POINTER
+	with jsondata:String(0), < jnode:JSONNode(JSONTypes.bool, qword 1, 0, 0) >
+		@call [fconf] = c [fopen]("config.json", "r")
+		cmp [fconf], NULL
+		jne @f
+			@call c [puts]("Configuration file not found")
+			@call [ExitProcess](0)
+		@@:
+
+		@call jsondata->streamRead([fconf], NULL, NULL, .eof_callback, NULL)
+		
+		try
+			@call jsondata->getLpChars()
+			@call jnode->make(JSONTypes.parse_string, qword addr pax, [jsondata.len], 0)->get("bot_key", 7, NULL)
+			test pax, pax
+			jnz @f
+				@call c [puts]("Configuration file didn`t contain bot_key parameter")
+				@call [ExitProcess](0)
+			@@:
+			@call [TG_API_KEY] = Utf8::toSysString([pax + JSONNode.lpStr], [pax + JSONNode.len])
+		catch
+			@call Exception::getExceptionInfo()
+			virtObj .e EXCEPTION_RECORD at pbx from pax
+			
+			mov pdx, [.e.ExceptionAddress]
+			switch [.e.ExceptionCode]
+				case_default
+					@call c [printf]("Unknown exception at address %p! Code: %x\n", pdx, [.e.ExceptionCode])
+					@call [ExitProcess](0)
+
+				case Exception.EXCEPTION_RETURN
+					virtObj .je JSONException at .e.ExceptionInformation
+					mov pdx, [.je.lpSmb]
+					@call c [printf]("Unexpected character '%c' in codpoint at index %d in config file\n", byte[pdx], [.je.pointIndex])
+					@call [ExitProcess](0)
+
+			end_switch
+		end_try
+	end_with
+	ret
+
+	proc .eof_callback c, lpStrilgLine, lParam
+		xor eax, eax
+		ret
+	endp
+endp
+
+@at_start @call c _init_()
+@at_end @call [SysFreeString]([TG_API_KEY])
+
+proc main
+	@call CNV::consoleToUtf8()
+	
+    @call [CoInitialize](0)
+    
+    ; int3
+	with <bot:MyTgClient([TG_API_KEY], [stdout])>
+
+		@call bot->onMessage(.callback_on_message)
+		@call bot->onEdit(.callback_on_edit)
+		
+		@call bot->onCommand("/help", -1, .callback_help, psp)
+		@call bot->onCommand("/start", -1, .callback_help, psp)
+		@call bot->onCommand("/murmurhash", -1, .callback_murmurhash, psp)
+		@call bot->onCommand("/random", -1, .callback_random, psp)
+		@call bot->onCommand("/random_word", -1, .callback_random_word, psp)
+		@call bot->onCommand("/markov", -1, .callback_markov, psp)
+
+		@call bot->onUnknownCommand(.callback_unknown)
+
+		@call bot->start()
+	end_with
+    
+    @call [CoUninitialize]()
+	@call [ExitProcess](0)
+	
+	proc .callback_on_message c uses pbx psi, bot:P_MyTgClient, msg
+		@sarg @arg1
+		; virtObj .bot MyTgClient at pbx from @arg1
+		virtObj .msg JSONNode at psi from @arg2
+
+		@call .msg->select("reply_to_message", -1)
+		cmp pax, JSONRetCodes.invalidKey
+		@block < je @fb >
+			@call c [puts]("Reply:")
+			; @call .msg->forEach(main.json_callback_print, 0)
+			@call .msg->select("chat", 4)->get("id", 2, NULL)
+			@call [bot]->send([pax + JSONNode.value], "Отвечаешь на мои сообщения, а ты умный я погляжу", -1, NULL)
+			ret
+		@endb
+		; @call c [puts]("New message:")
+		@call [bot]->reply(addr .msg, "А я тебя вижу", -1, NULL)
+		.return: ret
+	endp
+
+	proc .callback_on_edit c, bot:P_MyTgClient, msg:P_JSONNode
+		@sarg @arg1, @arg2
+		@call [bot]->reply([msg], "Поправляем за собой значит?", -1, NULL)
+		ret
+	endp
+
+	proc .callback_help c, bot:P_MyTgClient, msg:P_JSONNode, cmdData
+		@sarg @arg1, @arg2
+		; virtObj .bot MyTgClient at pbx from @arg1
+		; virtObj .msg JSONNode at psi from @arg2
+
+		; @call c [puts]("Command /help or /start:")
+		; @call [msg]->forEach(main.json_callback_print, 0)
+		@call [bot]->reply([msg],\ 
+			"Очень ~бес~полезный бот, который умеет реагировать на сообщения, ответы на сообщения и редактирование сообщений\n" # \
+			"Доступные команды:\n" # \
+			"/murmurhash \\\\[text\\\\] \\\\- вычисляет хэш от сообщения после команды\n" # \
+			"/random \\\\[a\\\\] \\\\[b\\\\] \\\\- выдает случайное целое число от a до b\\\\(не включительно\\\\), если не указать b \\\\- до a, если не указать оба \\\\- от 0 до 2^63\\\\-1\n" # \
+			"/random\\\\_word \\\\[w1\\\\] \\\\[w2\\\\] \\\\.\\\\.\\\\. \\\\- выдает случайное слово из перечисленных",\
+			-1, "MarkdownV2")
+		ret
+	endp
+
+	proc .callback_murmurhash c uses pdi, bot:P_MyTgClient, msg:P_JSONNode, cmdData
+		@sarg @arg1, @arg2
+		virtObj .cdata TgClient.CommandData at pdi from @arg3
+		
+		; @call c [puts]("Command /murmurhash:")
+		; @call [msg]->forEach(main.json_callback_print, 0)
+		mov edx, dword[.cdata.commandLen]
+		cmp edx, [.cdata.textLen]
+		@block je @fb
+			inc edx
+			mov pcx, [.cdata.pText]
+			add pcx, pdx
+			mov eax, [.cdata.textLen]
+			sub eax, edx
+			test pax, pax
+				jz @fb
+
+			@call c MurmurHash3(pcx, pax, 0)
+			with response:String(0)
+				@call response->sprintf(const fstr "Хэш вашего сообщения: %x", eax)->getLpChars()
+				@call [bot]->reply([msg], pax, [response.len], NULL)
+			end_with
+			ret
+		@endb
+		@call [bot]->reply([msg], "После команды должно быть сообщение, от которого высчитывается хэш", -1, NULL)
+		ret
+	endp
+
+	proc .callback_random c uses pbx psi pdi, bot, msg:P_JSONNode, cmdData
+		@sarg @arg2
+		virtObj .bot MyTgClient at pbx from @arg1
+		virtObj .cdata TgClient.CommandData at pdi from @arg3
+
+		; @call c [puts]("Command /random:")
+		; @call [msg]->forEach(main.json_callback_print, 0)
+
+		local min:QWORD, max:QWORD
+
+		pxor xmm0, xmm0
+		movq [min], xmm0
+		pcmpeqq xmm0, xmm0
+		psrlq xmm0, 1
+		movq [max], xmm0
+
+		mov edx, dword[.cdata.commandLen]
+		cmp edx, [.cdata.textLen]
+		@block je @fb
+			local pSysStr:POINTER;, pArgs:POINTER, argsLen:DWORD
+
+			inc edx
+			mov pcx, [.cdata.pText]
+			add pcx, pdx
+			; mov [pArgs], pcx
+			mov eax, [.cdata.textLen]
+			sub eax, edx
+			; mov [argsLen], eax
+			@call [pSysStr] = Utf8::toSysString(pcx, pax)
+			; @call c [putws]([pSysStr])
+			; @call c [printf]("%.*s\n", [.cdata.textLen], [text])
+
+		    local p_re:P_IRegExp2
+		    @call [CoCreateInstance](CLSID_IRegExp, NULL, CLSCTX.INPROC_SERVER, IID_IRegExp2, addr p_re)
+		    
+	    	local p_matches:P_IMatchCollection2, mcount:DWORD
+    		local p_match:P_IMatch2, p_subs:P_ISubMatches
+
+		    @call [p_re]->setPattern([.bot.patNum])
+		    @call [p_re]->setGlobal(VARIANT_FALSE)
+
+			@call [p_re]->Execute([pSysStr], addr p_matches)
+
+			; int3
+			@call [p_matches]->getCount(addr mcount)
+
+			switch [mcount]
+				case 0
+					@call .bot->reply([msg], "Некорректный формат ввода!", -1, NULL)
+
+					jmp end_case
+
+				case_default	 
+
+		    		@call [p_matches]->getItem(0, addr p_match)
+		    		
+		    		@call [p_match]->getSubMatches(addr p_subs)
+
+		    		local subItem:VARIANT
+
+		    		@call [p_subs]->getItem(0, addr subItem)
+		    		@call [SysStringLen]([subItem.bstrVal])
+		    		@call [max] = CNV::wstrToI64([subItem.bstrVal], pax, 10)
+		    		@call [VariantClear](addr subItem)
+		    		
+					@call [p_subs]->getItem(1, addr subItem)
+		    		cmp [subItem.vt], VT_EMPTY
+		    		@block < je @fb > 
+		    			movq xmm0, [max]
+		    			movq [min], xmm0
+			    		@call [SysStringLen]([subItem.bstrVal])
+			    		@call [max] = CNV::wstrToI64([subItem.bstrVal], pax, 10)
+			    		@call [VariantClear](addr subItem)
+			    	@endb
+
+		    		@call [p_subs]->Release()
+
+					@call [p_match]->Release()
+			end_switch
+
+			@call [p_matches]->Release()
+
+		    @call [p_re]->Release()
+			@call [SysFreeString]([pSysStr])
+
+			cmp [mcount], 0
+				je .return
+		@endb
+		
+		with response:String(0)
+			movq xmm1, [min]
+			movq xmm2, [max]
+
+			; проверка что xmm0 == xmm1
+			movq xmm0, xmm2
+			pcmpeqq xmm0, xmm1
+			
+			movq xmm0, xmm0			; зануление старших 64 бит
+			ptest xmm0, xmm0
+			@block < jnz @fb > 
+				; проверяем, точно ли нижняя граница больше верхней
+				movq xmm0, xmm2
+				pcmpgtq xmm0, xmm1
+
+				movq xmm0, xmm0		; зануление старших 64 бит
+				ptest xmm0, xmm0
+				@block < jnz @fb >
+					; обмениваем значения двух регистров
+					movq xmm0, xmm2
+					movq xmm2, xmm1
+					movq xmm1, xmm0
+
+					; xmm0 = -1
+					pcmpeqq xmm0, xmm0
+					
+					; увеличиваем обе границы диапазона так, чтобы 
+					; нижняя граница включалась, а верхняя нет,
+					; даже если они инвертированы
+					psubq xmm2, xmm0
+					psubq xmm1, xmm0
+					; movq [min], xmm1
+					; movq [max], xmm2
+				@endb 
+				@call qword xmm0 = .bot.rnd->next(qword xmm1, qword xmm2)
+				@call response->sprintf(const fstr "Ваше случайное число: %ld", qword xmm0)->getLpChars()
+				@call .bot->reply([msg], pax, [response.len], NULL)
+				; @call c [printf]("min: %lld, max: %lld\n", [min], [max])
+				exit_with
+				ret
+			@endb
+			@call .bot->reply([msg], "Диапазон не может быть пустым!", -1, NULL)
+		end_with
+		.return: ret
+	endp 
+
+	proc .callback_random_word c uses pbx psi pdi, bot, msg, cmdData
+		@sarg @arg2
+		virtObj .bot MyTgClient at pbx from @arg1
+		virtObj .cdata TgClient.CommandData at pdi from @arg3
+
+		; @call c [puts]("Command /random_word:")
+		; @call JSONNode::forEach([msg], main.json_callback_print, 0)
+
+		; @call .msg->get("text", 4)
+		mov edx, [.cdata.commandLen]
+		cmp edx, [.cdata.textLen]
+		@block je @fb
+			local pSysStr:POINTER, pArgs:POINTER, argsLen:DWORD
+
+			mov pcx, [.cdata.pText]
+			add pcx, pdx
+			mov [pArgs], pcx
+			mov eax, [.cdata.textLen]
+			sub eax, edx
+			mov [argsLen], eax
+
+			@call [pSysStr] = Utf8::toSysString([pArgs], [argsLen])
+
+		    local p_re:P_IRegExp2
+		    @call [CoCreateInstance](CLSID_IRegExp, NULL, CLSCTX.INPROC_SERVER, IID_IRegExp2, addr p_re)
+		    
+	    	local p_matches:P_IMatchCollection2, mcount:DWORD	
+    		local p_match:P_IMatch2, p_subs:POINTER
+
+		    @call [p_re]->setPattern([.bot.patWord])
+		    @call [p_re]->setGlobal(VARIANT_TRUE)
+
+			@call [p_re]->Execute([pSysStr], addr p_matches)
+
+			@call [p_matches]->getCount(addr mcount)
+			
+			switch [mcount]
+				case 0
+					@call .bot->reply([msg], "Некорректный формат ввода!", -1, NULL)
+					jmp end_case
+				case_default
+	    			movd xmm0, [mcount]
+					@call .bot.rnd->next(qword 0, qword xmm0)
+		    		@call [p_matches]->getItem(eax, addr p_match)
+		    		
+		    		@call [p_match]->getSubMatches(addr p_subs)
+
+		    		local subItem:VARIANT, lpUtf8:POINTER
+
+		    		@call [p_subs]->getItem(0, addr subItem)
+		    		@call [lpUtf8] = Utf8::fromWCharsz([subItem.bstrVal])
+					with response:String(0)
+						@call response->sprintf(const fstr "Ваше слово: %s", [lpUtf8])->getLpChars()
+						@call .bot->reply([msg], pax, [response.len], NULL)
+					end_with
+
+		    		@call CNV::free([lpUtf8])
+	    			@call [VariantClear](addr subItem)
+
+		    		@call [p_subs]->Release()
+		    		
+					@call [p_match]->Release()
+	    	end_switch
+
+			@call [p_matches]->Release()
+
+		    @call [p_re]->Release()
+			
+			@call [SysFreeString]([pSysStr])
+			ret
+		@endb
+		@call .bot->reply([msg], "Слова для выбора не обнаружены!", -1, NULL)
+		.return: ret
+	endp 
+
+	proc .callback_markov c uses pbx pdi psi pbp, bot, msg:P_JSONNode, cmdData
+		@sarg @arg2
+		virtObj .bot MyTgClient at pbx from @arg1
+		virtObj .cdata TgClient.CommandData at pbp from @arg3
+
+		; @call c [puts]("Command /markov:")
+		; @call [msg]->forEach(main.json_callback_print, 0)
+
+		mov edx, [.cdata.commandLen]
+		cmp edx, [.cdata.textLen]
+		@block jg @fb
+			local pSysStr:POINTER, pArgs:POINTER, argsLen:DWORD
+
+			inc edx
+			mov pcx, [.cdata.pText]
+			add pcx, pdx
+			mov [pArgs], pcx
+			mov eax, [.cdata.textLen]
+			sub eax, edx
+			mov [argsLen], eax
+
+			@call [pSysStr] = Utf8::toSysString([pArgs], [argsLen])
+
+
+		    local p_re:P_IRegExp2
+		    @call [CoCreateInstance](CLSID_IRegExp, NULL, CLSCTX.INPROC_SERVER, IID_IRegExp2, addr p_re)
+		    
+	    	local p_matches:P_IMatchCollection2, mcount:DWORD	
+    		local p_match:P_IMatch2, p_subs:P_ISubMatches
+
+		    @call [p_re]->setPattern([.bot.patRules])
+		    @call [p_re]->setGlobal(VARIANT_TRUE)
+		    @call [p_re]->setMultiline(VARIANT_TRUE)
+
+			@call [p_re]->Execute([pSysStr], addr p_matches)
+
+			@call [p_matches]->getCount(addr mcount)
+
+			switch [mcount]
+				case 0
+					@call .bot->reply([msg], "Некорректный формат ввода!", -1, NULL)
+					jmp end_case
+				case_default
+
+		    		locals 
+		    			key VARIANT
+						val VARIANT
+		    			lpUtf8 rptr 1
+						index dptr 0
+						length dptr 0
+					endl
+
+					xor esi, esi
+					with <sspa:SysStringPairArr([mcount])>,\
+							response:String(0), source:WString(0)
+						
+	    				; @call c [wprintf](L "Правила (%d)\n", [mcount])
+						@block 
+		    				@call [p_matches]->getItem(esi, addr p_match)
+		    				
+		    				@call [p_match]->getFirstIndex(addr index)
+		    				@call [p_match]->getLength(addr length)
+		    				
+		    				@call [p_match]->getSubMatches(addr p_subs)
+
+		    				@call [p_subs]->getItem(0, addr key)
+		    				@call [p_subs]->getItem(1, addr val)
+		    				@call sspa->append([key.bstrVal], [val.bstrVal])
+		    				; @call c [wprintf](L "%s: %s\n", [key.bstrVal], [val.bstrVal])
+
+		    				@call [p_subs]->Release()
+		    				@call [p_match]->Release()
+							inc esi
+						cmp esi, [mcount]
+						@endb jne @sb
+
+						local pSrc:POINTER, pKey:POINTER, pVal:POINTER
+						mov pax, [pSysStr]
+						shl [index], 1
+						add pax, [index]
+						shl [length], 1
+						add pax, [length]
+						mov [pSrc], pax
+
+						@call source->fromWChars(pax, -1)
+
+						mov esi, 10000
+						@block
+							xor edi, edi
+							@block
+								@call sspa->get(edi)
+								mov pdx, [pax + SysStringPair.key]
+								mov [pKey], pdx
+								mov pdx, [pax + SysStringPair.val]
+								mov [pVal], pdx
+								@call dword[length] = [SysStringLen]([pKey])
+								@call dword[index] = source->findWChars([pKey], [length])
+								cmp dword[index], -1
+									jne @fb
+								inc edi
+								cmp edi, [sspa.len]
+									jne @sb
+							@endb
+
+							cmp dword[index], -1
+								je @fb
+
+							; @call dword[length] = [SysStringLen]([pKey])
+							@call [SysStringLen]([pVal])
+							@call source->replaceWChars([index], [length], [pVal], pax)->println()
+							cmp [source.len], 65536
+								ja @fb
+							mov pax, [pVal]
+							cmp pax, NULL
+							je @f
+								cmp word[pax], "."
+									je @fb
+							@@:
+							dec esi
+							jnz @sb
+						@endb
+						
+						@call source->getLpWChars()
+						@call [lpUtf8] = Utf8::fromWCharsz(pax)
+						
+						@call response->sprintf(const fstr "Ваши данные: %s", [lpUtf8])->getLpChars()
+						@call .bot->reply([msg], pax, [response.len], NULL)
+
+						@call CNV::free([lpUtf8])
+					end_with
+			end_switch
+
+			@call [p_matches]->Release()
+
+		    @call [p_re]->Release()
+
+			@call [SysFreeString]([pSysStr])
+			ret
+		@endb
+		@call .bot->reply([msg], "Команд нет!", -1, NULL)
+		.return: ret
+	endp
+
+	proc .callback_unknown c uses pbx psi, bot:P_MyTgClient, msg:P_JSONNode, cmdData
+		@sarg @arg1, @arg2
+
+		; @call [msg]->forEach(main.json_callback_print, 0)
+		@call [bot]->reply([msg],\ 
+			"Неизвестная команда!",\
+			-1, NULL)
+		ret
+	endp
+endp
+
